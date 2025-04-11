@@ -143,3 +143,97 @@
         { level: level, index: index }
         { node-hash: hash })
 )
+
+;; Merkle Tree Update Logic
+(define-private (update-merkle-parent (level uint) (index uint))
+    (let (
+        (parent-index (/ index u2))
+        (is-right-child (is-eq (mod index u2) u1))
+        (sibling-index (if is-right-child (- index u1) (+ index u1)))
+        (current-node (get-merkle-node level index))
+        (sibling-node (get-merkle-node level sibling-index))
+    )
+        (set-merkle-node 
+            (+ level u1) 
+            parent-index 
+            (if is-right-child
+                (combine-hashes sibling-node current-node)
+                (combine-hashes current-node sibling-node)))
+    )
+)
+
+;; Verification Helpers
+(define-private (verify-proof-step
+    (proof-element (buff 32))
+    (state { current-hash: (buff 32), is-valid: bool }))
+    (let (
+        (current-hash (get current-hash state))
+        (combined-hash (combine-hashes current-hash proof-element))
+    )
+        {
+            current-hash: combined-hash,
+            is-valid: (and 
+                (get is-valid state) 
+                (is-valid-node-hash? combined-hash))
+        }
+    )
+)
+
+(define-private (verify-merkle-proof 
+    (leaf-hash (buff 32))
+    (proof (list 20 (buff 32)))
+    (root (buff 32)))
+    (let (
+        (proof-result (fold verify-proof-step
+            proof
+            { current-hash: leaf-hash, is-valid: true }))
+    )
+        (if (get is-valid proof-result)
+            (ok true)
+            (err ERR-INVALID-PROOF))
+    )
+)
+
+;; Public Deposit Function
+(define-public (make-deposit 
+    (commitment (buff 32))
+    (amount uint)
+    (token <ft-trait>))
+    (begin
+        (asserts! (is-valid-token token) (err ERR-INVALID-INPUT))
+        (asserts! (is-valid-commitment commitment) (err ERR-INVALID-COMMITMENT))
+        (asserts! (not (var-get contract-paused)) (err ERR-NOT-AUTHORIZED))
+        (asserts! (> amount u0) (err ERR-INVALID-AMOUNT))
+        (asserts! (<= amount MAX-DEPOSIT-AMOUNT) (err ERR-INVALID-AMOUNT))
+        
+        (let ((leaf-index (var-get next-leaf-index)))
+            (asserts! (< leaf-index (pow u2 MERKLE-TREE-HEIGHT)) (err ERR-TREE-FULL))
+            
+            (match (contract-call? token transfer amount tx-sender (as-contract tx-sender) none)
+                success (begin
+                    (set-merkle-node u0 leaf-index commitment)
+                    
+                    (update-merkle-parent u0 leaf-index)
+                    (update-merkle-parent u1 (/ leaf-index u2))
+                    (update-merkle-parent u2 (/ leaf-index u4))
+                    (update-merkle-parent u3 (/ leaf-index u8))
+                    (update-merkle-parent u4 (/ leaf-index u16))
+                    (update-merkle-parent u5 (/ leaf-index u32))
+                    
+                    (map-set deposit-records 
+                        { commitment: commitment }
+                        {
+                            leaf-index: leaf-index,
+                            stacks-block-height: stacks-block-height,
+                            depositor: tx-sender,
+                            amount: amount
+                        })
+                    
+                    (var-set next-leaf-index (+ leaf-index u1))
+                    (var-set total-deposited (+ (var-get total-deposited) amount))
+                    
+                    (ok leaf-index))
+                error (err ERR-TRANSFER-FAILED))
+        )
+    )
+)
