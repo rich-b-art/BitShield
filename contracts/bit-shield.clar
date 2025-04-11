@@ -237,3 +237,84 @@
         )
     )
 )
+
+;; Public Withdrawal Function
+(define-public (process-withdrawal
+    (nullifier (buff 32))
+    (root (buff 32))
+    (proof (list 20 (buff 32)))
+    (recipient principal)
+    (token <ft-trait>)
+    (amount uint))
+    (begin
+        (asserts! (is-valid-token token) (err ERR-INVALID-INPUT))
+        (asserts! (is-valid-nullifier nullifier) (err ERR-INVALID-INPUT))
+        (asserts! (is-valid-proof proof) (err ERR-INVALID-INPUT))
+        (asserts! (not (var-get contract-paused)) (err ERR-NOT-AUTHORIZED))
+        (asserts! (> amount u0) (err ERR-INVALID-AMOUNT))
+        (asserts! (<= amount MAX-DEPOSIT-AMOUNT) (err ERR-INVALID-AMOUNT))
+        (asserts! (is-none (map-get? nullifier-status { nullifier: nullifier })) 
+            (err ERR-NULLIFIER-EXISTS))
+        
+        (try! (verify-merkle-proof nullifier proof root))
+        
+        (map-set nullifier-status 
+            { nullifier: nullifier } 
+            { 
+                used: true, 
+                withdrawn-amount: amount,
+                withdrawn-at: stacks-block-height 
+            })
+        
+        (match (as-contract (contract-call? token transfer amount tx-sender recipient none))
+            success (ok true)
+            error (err ERR-TRANSFER-FAILED)
+        )
+    )
+)
+
+;; Admin Recovery Function
+(define-public (admin-recovery 
+    (token <ft-trait>)
+    (recipient principal)
+    (amount uint))
+    (begin
+        (asserts! (is-valid-token token) (err ERR-INVALID-INPUT))
+        (asserts! (is-contract-owner tx-sender) (err ERR-NOT-AUTHORIZED))
+        (asserts! (> amount u0) (err ERR-INVALID-AMOUNT))
+        
+        (match (as-contract (contract-call? token transfer amount tx-sender recipient none))
+            success (ok true)
+            error (err ERR-TRANSFER-FAILED)
+        )
+    )
+)
+
+;; Read-only Functions
+(define-read-only (get-contract-status)
+    (ok {
+        paused: (var-get contract-paused),
+        total-deposited: (var-get total-deposited),
+        next-leaf-index: (var-get next-leaf-index)
+    })
+)
+
+(define-read-only (get-current-root)
+    (ok (var-get merkle-root))
+)
+
+(define-read-only (check-nullifier-status (nullifier (buff 32)))
+    (map-get? nullifier-status { nullifier: nullifier })
+)
+
+(define-read-only (get-deposit-details (commitment (buff 32)))
+    (map-get? deposit-records { commitment: commitment })
+)
+
+;; Contract Initialization
+(begin
+    (var-set merkle-root ZERO-VALUE)
+    (var-set next-leaf-index u0)
+    (var-set contract-paused false)
+    (var-set total-deposited u0)
+)
